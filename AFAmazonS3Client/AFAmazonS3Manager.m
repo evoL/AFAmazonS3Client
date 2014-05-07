@@ -26,6 +26,7 @@ NSString * const AFAmazonS3ManagerErrorDomain = @"com.alamofire.networking.s3.er
 
 @interface AFAmazonS3Manager ()
 @property (readwrite, nonatomic, strong) NSURL *baseURL;
+@property (readwrite, nonatomic) NSTimeInterval sendTimeout;
 @end
 
 @implementation AFAmazonS3Manager
@@ -39,6 +40,7 @@ NSString * const AFAmazonS3ManagerErrorDomain = @"com.alamofire.networking.s3.er
 
     self.requestSerializer = [AFAmazonS3RequestSerializer serializer];
     self.responseSerializer = [AFXMLParserResponseSerializer serializer];
+    self.sendTimeout = 30;
 
     return self;
 }
@@ -52,7 +54,6 @@ NSString * const AFAmazonS3ManagerErrorDomain = @"com.alamofire.networking.s3.er
     }
 
     [self.requestSerializer setAccessKeyID:accessKey secret:secret];
-
     return self;
 }
 
@@ -184,7 +185,7 @@ NSString * const AFAmazonS3ManagerErrorDomain = @"com.alamofire.networking.s3.er
     [self.operationQueue addOperation:requestOperation];
 }
 
-- (void)postObjectWithFile:(NSString *)path
+- (void)postObjectWithFile:(NSURL *)path
            destinationPath:(NSString *)destinationPath
                 parameters:(NSDictionary *)parameters
                   progress:(void (^)(NSUInteger bytesWritten, long long totalBytesWritten, long long totalBytesExpectedToWrite))progress
@@ -194,7 +195,7 @@ NSString * const AFAmazonS3ManagerErrorDomain = @"com.alamofire.networking.s3.er
     [self setObjectWithMethod:@"POST" file:path destinationPath:destinationPath parameters:parameters progress:progress success:success failure:failure];
 }
 
-- (void)putObjectWithFile:(NSString *)path
+- (void)putObjectWithFile:(NSURL *)path
           destinationPath:(NSString *)destinationPath
                parameters:(NSDictionary *)parameters
                  progress:(void (^)(NSUInteger bytesWritten, long long totalBytesWritten, long long totalBytesExpectedToWrite))progress
@@ -212,49 +213,44 @@ NSString * const AFAmazonS3ManagerErrorDomain = @"com.alamofire.networking.s3.er
 }
 
 - (void)setObjectWithMethod:(NSString *)method
-                       file:(NSString *)filePath
+                       file:(NSURL *)fileUrl
             destinationPath:(NSString *)destinationPath
                  parameters:(NSDictionary *)parameters
                    progress:(void (^)(NSUInteger bytesWritten, long long totalBytesWritten, long long totalBytesExpectedToWrite))progress
                     success:(void (^)(id responseObject))success
                     failure:(void (^)(NSError *error))failure
 {
-    NSMutableURLRequest *fileRequest = [NSMutableURLRequest requestWithURL:[NSURL fileURLWithPath:filePath]];
-    [fileRequest setCachePolicy:NSURLCacheStorageNotAllowed];
-	
-    NSURLResponse *response = nil;
-    NSError *fileError = nil;
-    NSData *data = [NSURLConnection sendSynchronousRequest:fileRequest returningResponse:&response error:&fileError];
-	
-    if (data && response) {
-        NSMutableURLRequest *request = [self.requestSerializer multipartFormRequestWithMethod:method URLString:[[self.baseURL URLByAppendingPathComponent:destinationPath] absoluteString] parameters:parameters constructingBodyWithBlock:^(id <AFMultipartFormData> formData) {
-            if (![parameters valueForKey:@"key"]) {
-                [formData appendPartWithFormData:[[filePath lastPathComponent] dataUsingEncoding:NSUTF8StringEncoding] name:@"key"];
-            }
-            [formData appendPartWithFileData:data name:@"file" fileName:[filePath lastPathComponent] mimeType:[response MIMEType]];
-        } error:nil];
 
-//        NSURL *temporaryFileURL = [NSURL fileURLWithPath:[NSTemporaryDirectory() stringByAppendingPathComponent:[[NSUUID UUID] UUIDString]]];
-//        request = [self.requestSerializer requestWithMultipartFormRequest:request writingStreamContentsToFile:temporaryFileURL completionHandler:^(NSError *error) {
-//            if (!error) {
-//                [request setHTTPBody:[NSData dataWithContentsOfFile:[temporaryFileURL absoluteString]]];
-//            }
-//        }];
+    NSError* requestError = nil;
+    NSMutableURLRequest *request = [self.requestSerializer requestWithMethod:method
+                                                                   URLString:[[self.baseURL URLByAppendingPathComponent:destinationPath] absoluteString]
+                                                                  parameters:parameters
+                                                                       error:&requestError];
 
-        AFHTTPRequestOperation *requestOperation = [self HTTPRequestOperationWithRequest:request success:^(__unused AFHTTPRequestOperation *operation, id responseObject) {
-            if (success) {
-                success(responseObject);
-            }
-        } failure:^(__unused AFHTTPRequestOperation *operation, NSError *error) {
-            if (failure) {
-                failure(error);
-            }
-        }];
-		
-        [requestOperation setUploadProgressBlock:progress];
-		
-        [self.operationQueue addOperation:requestOperation];
+    if (requestError && failure) {
+        failure(requestError);
+        return;
     }
+
+    [request setHTTPBody:[NSData dataWithContentsOfURL:fileUrl]];
+    [request setTimeoutInterval:self.sendTimeout];
+
+    AFHTTPRequestOperation *requestOperation = [self HTTPRequestOperationWithRequest:request success:^(__unused AFHTTPRequestOperation *operation, id responseObject) {
+        if (success) {
+            success(responseObject);
+        }
+    } failure:^(__unused AFHTTPRequestOperation *operation, NSError *error) {
+        if (failure) {
+            NSLog(@"Operation: %@", operation);
+            NSLog(@"Response String: %@", operation.responseString);
+            failure(error);
+            return;
+        }
+    }];
+    
+    [requestOperation setUploadProgressBlock:progress];
+    
+    [self.operationQueue addOperation:requestOperation];
 }
 
 #pragma mark - NSKeyValueObserving
